@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  modern-talkinghead:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: modern-talkinghead-server
+    shm_size: '8gb'
+    ipc: host
+    ports:
+      - "8010:8010"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, utility, compute]
+    environment:
+      - CUDA_MODULE_LOADING=LAZY
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.6
+    volumes:
+      - ./cache:/app/cache
+      - ../../storage/cache/talking_heads:/app/storage_cache
+      - ../../vendor:/app/vendor
+      - talkinghead_weights:/app/weights
+    restart: unless-stopped
+
+volumes:
+  talkinghead_weights:
