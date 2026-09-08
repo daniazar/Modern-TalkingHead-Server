@@ -27,43 +27,43 @@ UPSTREAM_REPOS: Dict[str, Dict[str, Any]] = {
         "name": "AVTR-1",
         "url": "https://github.com/avaturn-live/avtr-1.git",
         "folder": "AVTR-1",
-        "hf_model_id": "avaturn/avtr-1",
+        "hf_model_id": "bentay85/avtr-1-tensorrt-ada",
     },
     "ditto": {
         "name": "Ditto-TalkingHead",
         "url": "https://github.com/PKU-YuanGroup/Ditto-TalkingHead.git",
         "folder": "Ditto",
-        "hf_model_id": "PKU-YuanGroup/Ditto",
+        "hf_model_id": "digital-avatar/ditto-talkinghead",
     },
     "float": {
         "name": "FLOAT",
         "url": "https://github.com/deepbrainai-research/float.git",
         "folder": "FLOAT",
-        "hf_model_id": "deepbrainai/float",
+        "hf_model_id": "yuvraj108c/float",
     },
     "fantasytalking2": {
         "name": "FantasyTalking2",
         "url": "https://github.com/Fantasy-Studio/FantasyTalking.git",
         "folder": "FantasyTalking2",
-        "hf_model_id": "Fantasy-Studio/FantasyTalking2",
+        "hf_model_id": "acvlab/FantasyTalking",
     },
     "hallo4": {
         "name": "Hallo4",
         "url": "https://github.com/fudan-generative-ai/hallo.git",
         "folder": "Hallo4",
-        "hf_model_id": "fudan-generative-ai/hallo4",
+        "hf_model_id": "fudan-generative-ai/hallo",
     },
     "personalive": {
         "name": "PersonaLive",
         "url": "https://github.com/facebookresearch/PersonaLive.git",
         "folder": "PersonaLive",
-        "hf_model_id": "facebook/personalive",
+        "hf_model_id": "huaichang/PersonaLive",
     },
     "syncanimation": {
         "name": "SyncAnimation",
-        "url": "https://github.com/zsy77/SyncAnimation.git",
+        "url": "https://github.com/syncanimation/syncanimation.git",
         "folder": "SyncAnimation",
-        "hf_model_id": "zsy77/SyncAnimation",
+        "hf_model_id": "camenduru/SyncTalk",
     },
     "echomimicv3": {
         "name": "EchoMimicV3",
@@ -116,7 +116,19 @@ def get_cache_status() -> Dict[str, Any]:
         )
         active_repo = str(repo_path if repo_path.exists() else alt_repo_path)
 
-        has_weights = weights_path.exists() and any(weights_path.iterdir())
+        weights_files = [f for f in weights_path.rglob("*") if f.is_file() and f.suffix.lower() in (".safetensors", ".pth", ".pt", ".bin", ".onnx", ".engine", ".ckpt")] if weights_path.exists() else []
+        has_weights = len(weights_files) > 0
+
+        if model_id == "musetalk" and not has_weights:
+            alt_musetalk = Path("/app/models")
+            if alt_musetalk.exists() and any(alt_musetalk.iterdir()):
+                weights_path = alt_musetalk
+                has_weights = True
+            else:
+                host_musetalk = BASE_DIR / "vendor" / "MuseTalk" / "models"
+                if host_musetalk.exists() and any(host_musetalk.iterdir()):
+                    weights_path = host_musetalk
+                    has_weights = True
 
         status["models"][model_id] = {
             "name": info["name"],
@@ -188,23 +200,54 @@ def download_huggingface_weights(model_id: str) -> bool:
     target_weights = WEIGHTS_DIR / model_id
     target_weights.mkdir(parents=True, exist_ok=True)
 
+    # Guard: Stop downloading if free disk space drops below 50 GB
+    try:
+        usage = shutil.disk_usage(WEIGHTS_DIR)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < 50.0:
+            logger.error(
+                f"🛑 DISK SAFEGUARD TRIGGERED: Free space is {free_gb:.1f} GB (< 50 GB threshold). "
+                f"Halting download of '{model_id}' to protect disk volume."
+            )
+            return False
+    except Exception as de:
+        logger.warning(f"Could not verify disk space: {de}")
+
     try:
         from huggingface_hub import snapshot_download
         logger.info(f"⬇ Downloading HuggingFace weights for {info['name']} ({hf_id})...")
+        token = os.getenv("HF_TOKEN")
         snapshot_download(
             repo_id=hf_id,
             local_dir=str(target_weights),
             local_dir_use_symlinks=False,
             resume_download=True,
             max_workers=4,
+            token=token,
         )
         logger.info(f"✓ Model weights downloaded to {target_weights}")
+
+        # Check if any .zip files were downloaded (e.g. SyncTalk) and extract them
+        import zipfile
+        for zf in target_weights.glob("*.zip"):
+            logger.info(f"Extracting archive {zf.name}...")
+            try:
+                with zipfile.ZipFile(zf, "r") as zip_ref:
+                    zip_ref.extractall(target_weights)
+                logger.info(f"✓ Successfully extracted {zf.name}")
+            except Exception as ze:
+                logger.warning(f"Failed to extract {zf.name}: {ze}")
+
         return True
     except ImportError:
         logger.warning("huggingface_hub library not installed.")
         return False
     except Exception as e:
-        logger.warning(f"Failed to download weights for {model_id}: {e}")
+        err_msg = str(e)
+        if "401" in err_msg or "gated" in err_msg.lower() or "restricted" in err_msg.lower():
+            logger.warning(f"Repository {hf_id} for '{model_id}' is gated. Set HF_TOKEN environment variable with approved access to download.")
+        else:
+            logger.warning(f"Failed to download weights for {model_id}: {e}")
         return False
 
 

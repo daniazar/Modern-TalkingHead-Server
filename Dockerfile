@@ -46,8 +46,6 @@ RUN mkdir -p /app/repos /app/weights /app/hf_cache /app/torch_cache /app/cache
 
 # 4. Cache manager utility for upstream repos & models (cached layer)
 COPY cache_manager.py /app/cache_manager.py
-# Pre-cache upstream repos shallowly during build (with || true fallback so build never fails if offline)
-RUN python /app/cache_manager.py --clone all || true
 
 # 5. Application server code (COPIED LAST: changes to server.py/engine_loader.py build in < 1 second!)
 COPY . /app/vendor/Modern-TalkingHead-Server

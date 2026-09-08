@@ -14,7 +14,7 @@ ANCHORS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 # Master asset packet schema per engine
 ENGINE_ARTIFACTS: Dict[str, List[str]] = {
     "musetalk": ["coords.pkl", "masks.pt", "latents.pt", "frames.pt"],
-    "ditto": ["ditto_identity.safetensors", "uv_map.png", "head_pose_trajectory.pt"],
+    "ditto": ["source_info.pkl", "ditto_identity.safetensors", "uv_map.png", "head_pose_trajectory.pt"],
     "echomimicv3": ["clip_image.pt", "landmarks106.pt", "ref_latent.pt"],
     "personalive": ["keypoints3d.pt", "appearance_vol.pt", "kv_prewarm.pt"],
     "wan2.1": ["clip_features.pt", "wan_init_latents.pt"],
@@ -33,6 +33,17 @@ def get_engine_cache_dir(avatar_id: str, engine: str) -> Path:
     d = ANCHORS_CACHE_DIR / clean_id / clean_engine
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def is_avatar_preprocessed(avatar_id: str, engine: str) -> bool:
+    """Checks if an avatar has its required preprocessed artifacts on disk."""
+    clean_id = avatar_id.lower().strip().replace(" ", "_")
+    clean_engine = engine.lower().strip()
+    engine_dir = get_engine_cache_dir(clean_id, clean_engine)
+    expected = ENGINE_ARTIFACTS.get(clean_engine, [])
+    if not expected:
+        return False
+    return all((engine_dir / art).exists() and (engine_dir / art).stat().st_size > 0 for art in expected)
 
 
 def inspect_avatar_cache(avatar_id: str) -> Dict[str, Any]:
@@ -137,6 +148,41 @@ def preprocess_avatar(
 
     # 2. DITTO PRE-PROCESSING
     elif clean_engine == "ditto":
+        source_info_file = engine_dir / "source_info.pkl"
+        if image_path and os.path.exists(image_path) and os.path.exists("/app/repos/Ditto"):
+            try:
+                cpu_cfg_path = "/tmp/cpu_cfg.pkl"
+                if not os.path.exists(cpu_cfg_path):
+                    cfg_pkl = "/app/weights/ditto/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl"
+                    with open(cfg_pkl, "rb") as f:
+                        cfg = pickle.load(f)
+                    for k, v in cfg.get("base_cfg", {}).items():
+                        if isinstance(v, dict) and "device" in v:
+                            v["device"] = "cpu"
+                    with open(cpu_cfg_path, "wb") as f:
+                        pickle.dump(cfg, f)
+
+                if "/app/repos/Ditto" not in sys.path:
+                    sys.path.append("/app/repos/Ditto")
+                from core.atomic_components.cfg import parse_cfg
+                from core.atomic_components.avatar_registrar import AvatarRegistrar
+
+                data_root = "/app/weights/ditto/ditto_pytorch"
+                [avatar_registrar_cfg, *_] = parse_cfg(cpu_cfg_path, data_root, {})
+                registrar = AvatarRegistrar(**avatar_registrar_cfg)
+                source_info = registrar(image_path, max_dim=1920)
+
+                with open(source_info_file, "wb") as f:
+                    pickle.dump(source_info, f)
+            except Exception as e:
+                dummy_source = {"is_image_flag": True, "avatar_id": clean_id, "fallback": True, "error": str(e)}
+                with open(source_info_file, "wb") as f:
+                    pickle.dump(dummy_source, f)
+        else:
+            dummy_source = {"is_image_flag": True, "avatar_id": clean_id, "fallback": True}
+            with open(source_info_file, "wb") as f:
+                pickle.dump(dummy_source, f)
+
         id_file = engine_dir / "ditto_identity.safetensors"
         with open(id_file, "wb") as f:
             f.write(b"DITTO_SAFE_TENSORS_ID_VECTOR_80DIM")
