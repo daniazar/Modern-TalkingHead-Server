@@ -38,7 +38,8 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --progress-bar off setuptools wheel && \
     (pip install --no-cache-dir --progress-bar off onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/ || pip install --no-cache-dir --progress-bar off onnxruntime) && \
-    pip install --no-cache-dir --progress-bar off --extra-index-url https://download.pytorch.org/whl/cu124 -r /app/requirements.txt || pip install --no-cache-dir --progress-bar off -r /app/requirements.txt
+    pip install --no-cache-dir --progress-bar off torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129 && \
+    pip install --no-cache-dir --progress-bar off -r /app/requirements.txt
 
 
 # 3. Dedicated directories for cached repos, model weights, and HuggingFace/Torch checkpoints (cached layer)
