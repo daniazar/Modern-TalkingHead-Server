@@ -177,7 +177,7 @@ TALKING_HEAD_REGISTRY: Dict[str, ModelMetadata] = {
         input_type="photo_or_video",
         vram_gb=9.0,
         description="Human preference-aligned audio-driven portrait animation with coherent motion dynamics.",
-        repo_url="https://github.com/Fantasy-AMAP/fantasy-talking2.git",
+        repo_url="https://github.com/Fantasy-AMAP/fantasy-talking.git",
         submodule_path="vendor/FantasyTalking2",
         weights_path="models/fantasytalking2",
     ),
@@ -192,7 +192,7 @@ TALKING_HEAD_REGISTRY: Dict[str, ModelMetadata] = {
         input_type="photo",
         vram_gb=11.5,
         description="High-resolution long-duration portrait animation with DPO-calibrated lip synchronization.",
-        repo_url="https://github.com/fudan-generative-vision/hallo4.git",
+        repo_url="https://github.com/fudan-generative-vision/hallo.git",
         submodule_path="vendor/Hallo4",
         weights_path="models/hallo4",
     ),
@@ -222,7 +222,7 @@ TALKING_HEAD_REGISTRY: Dict[str, ModelMetadata] = {
         input_type="video_loop",
         vram_gb=6.2,
         description="End-to-end synchronized talking head and upper-body human pose animation.",
-        repo_url="https://github.com/syncanimation/syncanimation.git",
+        repo_url="https://github.com/ZiqiaoPeng/SyncTalk.git",
         submodule_path="vendor/SyncAnimation",
         weights_path="models/syncanimation",
     ),
@@ -614,51 +614,213 @@ class EngineManager:
             is_cached = True
             active_optimizations.append(f"Multi-Frame Motion Action Loop Latents ({avatar_id})")
 
-        # 2. Neural Video Lip-Sync Synthesis (Delegated to Port 8007 for both images & video loops)
+        # 2. Neural Video Lip-Sync Synthesis (Standalone Native Engine Execution)
         try:
-            import urllib.request, json
-            musetalk_hosts = [
-                os.getenv("MUSETALK_SERVER_URL", "http://host.docker.internal:8007"),
-                "http://host.docker.internal:8007",
-                "http://musetalk:8007",
-                "http://localhost:8007",
-            ]
-            musetalk_url = None
-            for h in musetalk_hosts:
-                try:
-                    with urllib.request.urlopen(f"{h}/health", timeout=1) as r:
-                        if r.status == 200:
-                            musetalk_url = h
-                            break
-                except Exception:
-                    continue
+            if model_id == "musetalk":
+                import urllib.request, json
+                musetalk_hosts = [
+                    os.getenv("MUSETALK_SERVER_URL", "http://host.docker.internal:8007"),
+                    "http://host.docker.internal:8007",
+                    "http://musetalk:8007",
+                    "http://localhost:8007",
+                ]
+                musetalk_url = None
+                for h in musetalk_hosts:
+                    try:
+                        with urllib.request.urlopen(f"{h}/health", timeout=1) as r:
+                            if r.status == 200:
+                                musetalk_url = h
+                                break
+                    except Exception:
+                        continue
 
-            if not musetalk_url:
-                raise RuntimeError("Neural lip-sync GPU container on port 8007 is unreachable.")
+                if not musetalk_url:
+                    raise RuntimeError("Neural lip-sync GPU container on port 8007 is unreachable.")
 
-            req_data = json.dumps({
-                "avatar_id": avatar_id,
-                "video_path": video_or_image_path,
-                "audio_path": audio_path,
-                "output_path": output_path,
-                "fps": fps or meta.recommended_fps or 30,
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                f"{musetalk_url}/generate",
-                data=req_data,
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                content_type = resp.headers.get("Content-Type", "")
-                if "application/json" in content_type:
-                    res_json = json.loads(resp.read().decode())
-                    if not res_json.get("success"):
-                        raise RuntimeError(f"Neural lip-sync generation failed: {res_json.get('error')}")
-                else:
-                    vid_bytes = resp.read()
-                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                    with open(output_path, "wb") as f_out:
-                        f_out.write(vid_bytes)
+                req_data = json.dumps({
+                    "avatar_id": avatar_id,
+                    "video_path": video_or_image_path,
+                    "audio_path": audio_path,
+                    "output_path": output_path,
+                    "fps": fps or meta.recommended_fps or 30,
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    f"{musetalk_url}/generate",
+                    data=req_data,
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
+                    if "application/json" in content_type:
+                        res_json = json.loads(resp.read().decode())
+                        if not res_json.get("success"):
+                            raise RuntimeError(f"Neural lip-sync generation failed: {res_json.get('error')}")
+                    else:
+                        vid_bytes = resp.read()
+                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                        with open(output_path, "wb") as f_out:
+                            f_out.write(vid_bytes)
+
+            elif model_id == "ditto":
+                import subprocess
+                logger.info(f"🚀 [Ditto] Starting native Motion-Space Diffusion synthesis for '{avatar_id}'...")
+                cmd = [
+                    sys.executable, "/app/repos/Ditto/inference.py",
+                    "--audio_path", audio_path,
+                    "--source_path", video_or_image_path,
+                    "--output_path", output_path,
+                    "--data_root", "/app/weights/ditto/ditto_pytorch",
+                    "--cfg_pkl", "/app/weights/ditto/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl",
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/repos/Ditto")
+                if res.returncode != 0:
+                    logger.error(f"Ditto native execution failed: {res.stderr}")
+                    raise RuntimeError(f"Native Ditto inference failed: {res.stderr.strip()[-350:]}")
+                logger.info(f"✅ [Ditto] Native synthesis completed: {output_path}")
+
+            elif model_id == "float":
+                import subprocess
+                logger.info(f"🚀 [FLOAT] Starting native Generative Motion Flow matching for '{avatar_id}'...")
+                cmd = [
+                    sys.executable, "/app/repos/FLOAT/generate.py",
+                    "--ckpt_path", "/app/weights/float/float.pth",
+                    "--wav2vec_model_path", "/app/weights/float/wav2vec2-base-960h",
+                    "--audio2emotion_path", "/app/weights/float/wav2vec-english-speech-emotion-recognition",
+                    "--ref_path", video_or_image_path,
+                    "--aud_path", audio_path,
+                    "--res_video_path", output_path,
+                    "--nfe", str(opts.get("nfe", 10)),
+                    "--fps", str(fps or meta.recommended_fps or 25),
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/repos/FLOAT")
+                if res.returncode != 0:
+                    logger.error(f"FLOAT native execution failed: {res.stderr}")
+                    raise RuntimeError(f"Native FLOAT inference failed: {res.stderr.strip()[-350:]}")
+                logger.info(f"✅ [FLOAT] Native synthesis completed: {output_path}")
+
+            elif model_id == "hallo4":
+                import subprocess
+                logger.info(f"🚀 [Hallo4] Starting native fast-distilled portrait animation (12 steps) for '{avatar_id}'...")
+                cmd = [
+                    sys.executable, "/app/repos/Hallo4/scripts/inference.py",
+                    "-c", "configs/inference/fast_distilled.yaml",
+                    "--source_image", video_or_image_path,
+                    "--driving_audio", audio_path,
+                    "--output", output_path,
+                ]
+                env = os.environ.copy()
+                env["PYTHONPATH"] = "/app/repos/Hallo4"
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/repos/Hallo4", env=env)
+                if res.returncode != 0:
+                    logger.error(f"Hallo4 native execution failed: {res.stderr}")
+                    raise RuntimeError(f"Native Hallo4 inference failed: {res.stderr.strip()[-350:]}")
+                logger.info(f"✅ [Hallo4] Native synthesis completed: {output_path}")
+
+            elif model_id == "echomimicv3":
+                import subprocess
+                logger.info(f"🚀 [EchoMimicV3] Starting native 1.3B Flash Pro synthesis (8-step Flow UniPC) for '{avatar_id}'...")
+                cmd = [
+                    sys.executable, "/app/repos/EchoMimicV3/infer_full.py",
+                    "--image_path", video_or_image_path,
+                    "--audio_path", audio_path,
+                    "--output_path", output_path,
+                    "--num_inference_steps", str(opts.get("num_inference_steps", 8)),
+                    "--fps", str(fps or meta.recommended_fps or 25),
+                ]
+                env = os.environ.copy()
+                env["PYTHONPATH"] = "/app/repos/EchoMimicV3"
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/repos/EchoMimicV3", env=env)
+                if res.returncode != 0:
+                    logger.error(f"EchoMimicV3 native execution failed: {res.stderr}")
+                    raise RuntimeError(f"Native EchoMimicV3 inference failed: {res.stderr.strip()[-350:]}")
+                if not os.path.exists(output_path):
+                    raise RuntimeError(f"Native EchoMimicV3 inference finished without creating {output_path}")
+                logger.info(f"✅ [EchoMimicV3] Native synthesis completed: {output_path}")
+
+            elif model_id == "personalive":
+                import subprocess, glob, shutil
+                logger.info(f"🚀 [PersonaLive] Starting streaming portrait diffusion for '{avatar_id}'...")
+                results_dir = "/app/repos/PersonaLive/results"
+                if os.path.exists(results_dir):
+                    shutil.rmtree(results_dir, ignore_errors=True)
+                os.makedirs(results_dir, exist_ok=True)
+                cmd = [
+                    sys.executable, "/app/repos/PersonaLive/inference_offline.py",
+                    "--stream_gen", "True",
+                    "--reference_image", video_or_image_path,
+                    "--driving_video", video_or_image_path if not is_image else "/app/repos/PersonaLive/demo/driving_video.mp4",
+                ]
+                env = os.environ.copy()
+                env["PYTHONPATH"] = "/app/repos/PersonaLive"
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/repos/PersonaLive", env=env)
+                if res.returncode != 0:
+                    logger.error(f"PersonaLive native execution failed: {res.stderr}")
+                    raise RuntimeError(f"Native PersonaLive inference failed: {res.stderr.strip()[-350:]}")
+                produced_videos = sorted(glob.glob("/app/repos/PersonaLive/results/**/split_vid/*.mp4", recursive=True), key=os.path.getmtime, reverse=True)
+                if not produced_videos:
+                    produced_videos = sorted(glob.glob("/app/repos/PersonaLive/results/**/*.mp4", recursive=True), key=os.path.getmtime, reverse=True)
+                if not produced_videos:
+                    raise RuntimeError("PersonaLive completed but produced no video in /app/repos/PersonaLive/results/")
+                raw_vid = produced_videos[0]
+                # Mux with driving audio
+                mux_cmd = [
+                    "ffmpeg", "-y", "-i", raw_vid, "-i", audio_path,
+                    "-c:v", "copy", "-c:a", "aac", "-shortest", output_path
+                ]
+                mux_res = subprocess.run(mux_cmd, capture_output=True, text=True)
+                if mux_res.returncode != 0 or not os.path.exists(output_path):
+                    shutil.copy(raw_vid, output_path)
+                logger.info(f"✅ [PersonaLive] Native synthesis completed: {output_path}")
+
+            elif model_id == "fantasytalking2":
+                import subprocess, glob, shutil
+                logger.info(f"🚀 [FantasyTalking2] Starting DiT preference-aligned avatar synthesis for '{avatar_id}'...")
+                out_dir = os.path.dirname(output_path)
+                os.makedirs(out_dir, exist_ok=True)
+                cmd = [
+                    sys.executable, "/app/repos/FantasyTalking2/infer.py",
+                    "--fantasytalking_model_path", "/app/weights/fantasytalking2/fantasytalking_model.ckpt",
+                    "--wav2vec_model_dir", "/app/weights/float/wav2vec2-base-960h",
+                    "--image_path", video_or_image_path,
+                    "--audio_path", audio_path,
+                    "--output_dir", out_dir,
+                    "--num_persistent_param_in_dit", "1000000000",
+                    "--max_num_frames", "81",
+                ]
+                env = os.environ.copy()
+                env["PYTHONPATH"] = "/app/repos/FantasyTalking2"
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/repos/FantasyTalking2", env=env)
+                if res.returncode != 0:
+                    logger.error(f"FantasyTalking2 native execution failed: {res.stderr}")
+                    raise RuntimeError(f"Native FantasyTalking2 inference failed: {res.stderr.strip()[-350:]}")
+                produced_videos = sorted(glob.glob(os.path.join(out_dir, "*.mp4")), key=os.path.getmtime, reverse=True)
+                if produced_videos and produced_videos[0] != output_path:
+                    shutil.copy(produced_videos[0], output_path)
+                logger.info(f"✅ [FantasyTalking2] Native synthesis completed: {output_path}")
+
+            elif model_id == "syncanimation":
+                import subprocess
+                logger.info(f"🚀 [SyncAnimation] Starting audio-driven human pose & head NeRF for '{avatar_id}'...")
+                cmd = [
+                    sys.executable, "/app/repos/SyncAnimation/main.py",
+                    "--test",
+                    "--workspace", "/app/weights/syncanimation",
+                    "--aud", audio_path,
+                ]
+                env = os.environ.copy()
+                env["PYTHONPATH"] = "/app/repos/SyncAnimation"
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/repos/SyncAnimation", env=env)
+                if res.returncode != 0:
+                    logger.error(f"SyncAnimation native execution failed: {res.stderr}")
+                    raise RuntimeError(f"Native SyncAnimation inference failed: {res.stderr.strip()[-350:]}")
+                logger.info(f"✅ [SyncAnimation] Native synthesis completed: {output_path}")
+
+            else:
+                raise NotImplementedError(
+                    f"Native neural pipeline for '{model_id}' ({meta.name}) is currently being integrated for Blackwell sm_120. "
+                    f"Silent fallback to MuseTalk has been disabled. "
+                    f"Active standalone engines: 'musetalk', 'ditto', 'float', 'hallo4', 'echomimicv3', 'personalive', 'fantasytalking2', 'syncanimation'."
+                )
 
             encoding_ms = round((time.perf_counter() - t_enc_0) * 1000, 2)
             total_latency_ms = round((time.perf_counter() - start_time) * 1000, 1)
@@ -680,7 +842,12 @@ class EngineManager:
                 "hardware_encoder": "TensorRT FP16 / NVENC (Real-Time Neural Lip-Sync)",
                 "audio_latent_cache_hit": is_cached,
             }
+        except (NotImplementedError, ModelWeightsMissingError):
+            raise
         except Exception as neural_err:
+            if not opts.get("allow_mux_fallback", False):
+                logger.error(f"Neural inference for '{model_id}' failed: {neural_err}")
+                raise RuntimeError(f"Neural inference for '{model_id}' failed: {neural_err}") from neural_err
             logger.warning(f"Neural lip-sync delegation failed ({neural_err}). Falling back to hardware muxing...")
 
         # Fallback: If driver is an animated video loop or neural engine unreachable, mux with NVENC
