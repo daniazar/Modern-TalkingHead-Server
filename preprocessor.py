@@ -14,7 +14,7 @@ ANCHORS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 # Master asset packet schema per engine
 ENGINE_ARTIFACTS: Dict[str, List[str]] = {
     "musetalk": ["coords.pkl", "masks.pt", "latents.pt", "frames.pt"],
-    "ditto": ["source_info.pkl", "ditto_identity.safetensors", "uv_map.png", "head_pose_trajectory.pt"],
+    "ditto": ["f_s.pt", "x_s_info.pt", "grids.pt", "masks.pt", "frames.pt", "ditto_info.json"],
     "echomimicv3": ["clip_image.pt", "landmarks106.pt", "ref_latent.pt"],
     "personalive": ["keypoints3d.pt", "appearance_vol.pt", "kv_prewarm.pt"],
     "wan2.1": ["clip_features.pt", "wan_init_latents.pt"],
