@@ -463,6 +463,28 @@ async def webrtc_offer_endpoint(req: StreamSessionRequest):
     })
 
 
+@app.on_event("startup")
+async def startup_warmup():
+    """
+    Background non-blocking server warmup.
+    Pre-initializes persistent DittoEngineManager, compiles LMDM, and warms up the B=4 CUDA Graph
+    so that even the very first production request achieves instant sub-realtime execution.
+    """
+    import threading
+    def _warmup_worker():
+        try:
+            if "/app/scripts/ditto" not in sys.path:
+                sys.path.insert(0, "/app/scripts/ditto")
+            if "/app/repos/Ditto" not in sys.path:
+                sys.path.insert(0, "/app/repos/Ditto")
+            from run_preprocessed_ditto import get_global_ditto_engine
+            engine = get_global_ditto_engine()
+            _ = engine.get_compiled_engine(batch_size=4)
+            print("🚀 [Startup] Ditto Engine & CUDA Graph B=4 successfully pre-warmed!")
+        except Exception as e:
+            print(f"[Startup Warmup] Note: {e}")
+    threading.Thread(target=_warmup_worker, daemon=True).start()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Modern Talking-Head Server")
