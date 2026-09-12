@@ -688,8 +688,10 @@ class EngineManager:
                     logger.info(f"⚡ [Ditto] Found preprocessed master packet at {packet_dir}! Running persistent CUDA graph runtime...")
                     batch_size = int(opts.get("batch_size", 4))
                     max_vram_loops = int(opts.get("max_vram_loops", 1))
+                    max_host_loops = int(opts.get("max_host_loops", 8))
                     compact = opts.get("compact", True)
                     silence_bypass = opts.get("silence_bypass", True)
+                    sampling_timesteps = int(opts.get("sampling_timesteps", 10))
                     emo = int(opts.get("emo", 4))
 
                     # In-process persistent engine execution (0ms recompile / 0ms loop reload)
@@ -707,8 +709,10 @@ class EngineManager:
                             emo=emo,
                             batch_size=batch_size,
                             max_vram_loops=max_vram_loops,
+                            max_host_loops=max_host_loops,
                             compact=compact,
                             silence_bypass=silence_bypass,
+                            sampling_timesteps=sampling_timesteps,
                         )
                         logger.info(f"✅ [Ditto] In-process persistent synthesis completed in {time.perf_counter() - t_call_0:.2f}s: {output_path}")
                     except Exception as in_proc_err:
@@ -720,6 +724,8 @@ class EngineManager:
                             "--output_path", output_path,
                             "--batch_size", str(batch_size),
                             "--max_vram_loops", str(max_vram_loops),
+                            "--max_host_loops", str(max_host_loops),
+                            "--sampling_timesteps", str(sampling_timesteps),
                             "--emo", str(emo),
                         ]
                         if compact:
