@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import torch
+import json
+import logging
+
+logger = logging.getLogger("ModernTalkingHead.Preprocessor")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 # Base cache path
 ANCHORS_CACHE_DIR = Path("/app/cache/anchors") if os.path.exists("/app") else Path(os.getcwd()) / "storage" / "cache" / "anchors"
@@ -13,7 +19,7 @@ ANCHORS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Master asset packet schema per engine
 ENGINE_ARTIFACTS: Dict[str, List[str]] = {
-    "musetalk": ["coords.pkl", "masks.pt", "latents.pt", "frames.pt"],
+    "musetalk": ["coords.pkl", "masks.pt", "latents.pt", "frames.pt", "geometry.pkl"],
     "ditto": ["f_s.pt", "x_s_info.pt", "grids.pt", "masks.pt", "frames.pt", "ditto_info.json"],
     "echomimicv3": ["clip_image.pt", "landmarks106.pt", "ref_latent.pt"],
     "personalive": ["keypoints3d.pt", "appearance_vol.pt", "kv_prewarm.pt"],
@@ -30,7 +36,10 @@ def get_engine_cache_dir(avatar_id: str, engine: str) -> Path:
     """Returns directory path for an avatar and engine's pre-processed cache."""
     clean_id = avatar_id.lower().strip().replace(" ", "_")
     clean_engine = engine.lower().strip()
-    d = ANCHORS_CACHE_DIR / clean_id / clean_engine
+    if clean_engine == "ditto":
+        d = Path("/app/cache/avatars/ditto") / clean_id if os.path.exists("/app") else Path(os.getcwd()) / "storage" / "cache" / "avatars" / "ditto" / clean_id
+    else:
+        d = ANCHORS_CACHE_DIR / clean_id / clean_engine
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -125,76 +134,85 @@ def preprocess_avatar(
 
     # 1. MUSE TALK PRE-PROCESSING
     if clean_engine == "musetalk":
-        # Bounding box coords
-        coords_file = engine_dir / "coords.pkl"
-        sample_coords = {"bbox": [140, 360, 160, 352], "crop_size": [256, 256], "feather_margin": 16}
-        with open(coords_file, "wb") as f:
-            pickle.dump(sample_coords, f)
+        source_media = image_path or video_path
+        if not source_media or not os.path.exists(source_media):
+            raise ValueError(f"Missing valid image_path or video_path for musetalk pre-processing: {source_media}")
 
-        # BiSeNet alpha mask tensor
-        masks_file = engine_dir / "masks.pt"
-        mask_tensor = torch.ones((1, 1, 256, 256), dtype=torch.float16)
-        torch.save(mask_tensor, masks_file)
+        from musetalk_engine import precompile_avatar_source
+        opts = options or {}
+        bbox_shift = int(opts.get("bbox_shift", 0))
+        cycle_frames = int(opts.get("cycle_frames", 25))
+        aliases = opts.get("aliases", [])
 
-        # Pre-computed VAE latents
-        latents_file = engine_dir / "latents.pt"
-        latents_tensor = torch.randn((1, 8, 32, 32), dtype=torch.float16)
-        torch.save(latents_tensor, latents_file)
-
-        # Pre-stacked background frames
-        frames_file = engine_dir / "frames.pt"
-        frames_tensor = torch.zeros((25, 3, 512, 512), dtype=torch.uint8)
-        torch.save(frames_tensor, frames_file)
+        mirror_root = str(Path("/app/storage/cache/avatars") if os.path.exists("/app") else Path(os.getcwd()) / "storage" / "cache" / "avatars")
+        ok = precompile_avatar_source(
+            source_path=source_media,
+            avatar_id=clean_id,
+            out_root=str(engine_dir.parent),
+            mirror_storage_root=mirror_root,
+            cycle_frames=cycle_frames,
+            bbox_shift=bbox_shift,
+            aliases=aliases,
+        )
+        if not ok:
+            raise RuntimeError(f"MuseTalk precompilation failed for avatar '{clean_id}'")
 
     # 2. DITTO PRE-PROCESSING
     elif clean_engine == "ditto":
-        source_info_file = engine_dir / "source_info.pkl"
-        if image_path and os.path.exists(image_path) and os.path.exists("/app/repos/Ditto"):
-            try:
-                cpu_cfg_path = "/tmp/cpu_cfg.pkl"
-                if not os.path.exists(cpu_cfg_path):
-                    cfg_pkl = "/app/weights/ditto/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl"
-                    with open(cfg_pkl, "rb") as f:
-                        cfg = pickle.load(f)
-                    for k, v in cfg.get("base_cfg", {}).items():
-                        if isinstance(v, dict) and "device" in v:
-                            v["device"] = "cpu"
-                    with open(cpu_cfg_path, "wb") as f:
-                        pickle.dump(cfg, f)
+        source_media = video_path or image_path
+        if not source_media or not os.path.exists(source_media):
+            raise ValueError(f"Missing valid video_path or image_path for ditto pre-processing: {source_media}")
 
-                if "/app/repos/Ditto" not in sys.path:
-                    sys.path.append("/app/repos/Ditto")
-                from core.atomic_components.cfg import parse_cfg
-                from core.atomic_components.avatar_registrar import AvatarRegistrar
+        # Instant Cache Hit Check
+        if is_avatar_preprocessed(clean_id, "ditto"):
+            logger.info(f"⚡ [Ditto Preprocessor] Avatar '{clean_id}' is already preprocessed. Instant cache hit.")
+            manifest_path = engine_dir / "ditto_info.json"
+            manifest = {}
+            if manifest_path.exists():
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+            return {
+                "success": True,
+                "avatar_id": clean_id,
+                "engine": "ditto",
+                "cached": True,
+                "cache_hit": True,
+                "cache_dir": str(engine_dir),
+                "manifest": manifest,
+                "artifacts_created": [f"{art} (CACHED)" for art in expected_artifacts],
+                "total_size_mb": round(sum((engine_dir / a).stat().st_size for a in expected_artifacts if (engine_dir / a).exists()) / (1024 * 1024), 2),
+                "elapsed_seconds": round(time.perf_counter() - t0, 3),
+                "cold_start_readiness": "<8ms (Master Packet Loaded)",
+                "message": f"Avatar '{clean_id}' Master Asset Packet is cached and ready for instant playback.",
+            }
 
-                data_root = "/app/weights/ditto/ditto_pytorch"
-                [avatar_registrar_cfg, *_] = parse_cfg(cpu_cfg_path, data_root, {})
-                registrar = AvatarRegistrar(**avatar_registrar_cfg)
-                source_info = registrar(image_path, max_dim=1920)
+        opts = options or {}
+        try:
+            from preprocess_ditto import preprocess_avatar_ditto
+        except ImportError:
+            from .preprocess_ditto import preprocess_avatar_ditto
 
-                with open(source_info_file, "wb") as f:
-                    pickle.dump(source_info, f)
-            except Exception as e:
-                dummy_source = {"is_image_flag": True, "avatar_id": clean_id, "fallback": True, "error": str(e)}
-                with open(source_info_file, "wb") as f:
-                    pickle.dump(dummy_source, f)
-        else:
-            dummy_source = {"is_image_flag": True, "avatar_id": clean_id, "fallback": True}
-            with open(source_info_file, "wb") as f:
-                pickle.dump(dummy_source, f)
-
-        id_file = engine_dir / "ditto_identity.safetensors"
-        with open(id_file, "wb") as f:
-            f.write(b"DITTO_SAFE_TENSORS_ID_VECTOR_80DIM")
-            f.write(os.urandom(128 * 1024))
-
-        uv_file = engine_dir / "uv_map.png"
-        with open(uv_file, "wb") as f:
-            f.write(os.urandom(64 * 1024))
-
-        traj_file = engine_dir / "head_pose_trajectory.pt"
-        traj_tensor = torch.zeros((100, 3), dtype=torch.float32)
-        torch.save(traj_tensor, traj_file)
+        ditto_res = preprocess_avatar_ditto(
+            video_path=source_media,
+            avatar_id=clean_id,
+            cache_pkl=opts.get("cache_pkl"),
+            output_dir=str(engine_dir.parent),
+            device=opts.get("device", "cuda" if torch.cuda.is_available() else "cpu"),
+        )
+        return {
+            "success": True,
+            "avatar_id": clean_id,
+            "engine": "ditto",
+            "cached": True,
+            "cache_hit": False,
+            "cache_dir": str(engine_dir),
+            "manifest": ditto_res.get("manifest", {}),
+            "artifacts_created": [f"{art} (NEW)" for art in expected_artifacts if (engine_dir / art).exists()],
+            "total_size_mb": round(sum((engine_dir / a).stat().st_size for a in expected_artifacts if (engine_dir / a).exists()) / (1024 * 1024), 2),
+            "elapsed_seconds": ditto_res.get("duration_seconds", round(time.perf_counter() - t0, 3)),
+            "cold_start_readiness": "<8ms (Master Packet Loaded)",
+            "message": f"Pre-processed Master Asset Packet for '{clean_id}' on engine 'ditto'.",
+        }
 
     # 3. ECHOMIMIC V3 PRE-PROCESSING
     elif clean_engine == "echomimicv3":

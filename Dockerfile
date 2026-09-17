@@ -38,12 +38,18 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --progress-bar off setuptools wheel && \
     (pip install --no-cache-dir --progress-bar off onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/ || pip install --no-cache-dir --progress-bar off onnxruntime) && \
-    pip install --no-cache-dir --progress-bar off torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129 && \
+    pip install --no-cache-dir --upgrade --progress-bar off torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129 && \
+    pip install --no-cache-dir --progress-bar off openmim "huggingface_hub[cli]>=0.30.2" gdown && \
+    mim install mmengine "mmcv-lite==2.1.0" && \
+    pip install --no-cache-dir --progress-bar off --no-build-isolation chumpy && \
+    pip install --no-cache-dir --progress-bar off --extra-index-url https://pypi.nvidia.com "tensorrt_cu12_libs==10.15.1.29" "tensorrt_cu12_bindings==10.15.1.29" "tensorrt-cu12==10.15.1.29" && \
     pip install --no-cache-dir --progress-bar off -r /app/requirements.txt
 
+COPY patch_mmcv.py /app/patch_mmcv.py
+RUN python /app/patch_mmcv.py
 
 # 3. Dedicated directories for cached repos, model weights, and HuggingFace/Torch checkpoints (cached layer)
-RUN mkdir -p /app/repos /app/weights /app/hf_cache /app/torch_cache /app/cache
+RUN mkdir -p /app/repos /app/weights /app/hf_cache /app/torch_cache /app/cache /root/.cache/torch/hub/checkpoints
 
 # 4. Cache manager utility for upstream repos & models (cached layer)
 COPY cache_manager.py /app/cache_manager.py
