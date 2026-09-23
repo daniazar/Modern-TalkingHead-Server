@@ -781,10 +781,14 @@ async def get_calibration_status():
 
 
 class StreamSessionRequest(BaseModel):
-    avatar_id: str = Field(..., description="Target avatar ID")
-    engine: Optional[str] = Field("musetalk", description="Target model engine")
-    fps: Optional[int] = Field(30, description="Target streaming frame rate")
+    avatar_id: str = Field("ruby_burgundy", description="Target avatar ID")
+    engine: Optional[str] = Field("ditto", description="Target model engine")
+    fps: Optional[int] = Field(25, description="Target streaming frame rate")
     webrtc_offer: Optional[Dict[str, Any]] = Field(None, description="Client WebRTC SDP offer")
+    sdp: Optional[str] = Field(None, description="Raw SDP offer string")
+    type: Optional[str] = Field("offer", description="SDP type")
+    enable_rife: Optional[bool] = Field(False, description="Enable RIFE 2x frame doubler (50 FPS)")
+    quality: Optional[str] = Field("high", description="Streaming quality profile: ultra (10M), high (6M), balanced (3M), low (1.2M)")
 
 
 @app.post("/stream/session")
@@ -801,6 +805,7 @@ async def create_stream_session_endpoint(req: StreamSessionRequest):
         "avatar_id": req.avatar_id,
         "engine": req.engine,
         "fps": req.fps,
+        "quality": req.quality or "high",
         "target_latency_ms": 24,
         "hardware_ring_buffer": "CUDA_NV12_NVENC_RING",
         "stream_url": f"/stream/webrtc/{session_id}",
@@ -815,17 +820,57 @@ async def create_stream_session_endpoint(req: StreamSessionRequest):
 @app.post("/stream/webrtc/offer")
 async def webrtc_offer_endpoint(req: StreamSessionRequest):
     """
-    Processes WebRTC SDP offer and returns synthetic peer connection SDP answer.
+    Full-duplex WebRTC SDP negotiation:
+    Establishes peer connection with bidirectional audio receiver and H.264 video transmitter.
     """
     record_activity()
-    session_id = f"webrtc_{req.avatar_id}_{int(time.time() * 1000)}"
-    return JSONResponse(content={
-        "type": "answer",
-        "sdp": f"v=0\r\no=- {session_id} 2 IN IP4 127.0.0.1\r\ns=NewsStudio RealTime\r\nt=0 0\r\na=sendonly\r\n",
-        "session_id": session_id,
-        "status": "connected",
-        "latency_ms": 18.4,
-    })
+    sdp_str = req.sdp
+    sdp_type = req.type or "offer"
+    if not sdp_str and req.webrtc_offer:
+        sdp_str = req.webrtc_offer.get("sdp")
+        sdp_type = req.webrtc_offer.get("type", "offer")
+
+    if not sdp_str:
+        raise HTTPException(status_code=400, detail="Missing WebRTC SDP offer.")
+
+    try:
+        if "/app" not in sys.path:
+            sys.path.insert(0, "/app")
+        from webrtc_streamer import webrtc_manager
+        res = await webrtc_manager.handle_offer(
+            sdp=sdp_str,
+            sdp_type=sdp_type,
+            avatar_id=req.avatar_id,
+            fps=req.fps or 25,
+            enable_rife=req.enable_rife or False,
+            engine=req.engine or "ditto",
+            quality=req.quality or "high",
+        )
+        return JSONResponse(content=res)
+    except Exception as e:
+        logger.error(f"WebRTC offer handling failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stream/webrtc/stats")
+async def webrtc_stats_endpoint():
+    """Returns active WebRTC streaming sessions and metrics."""
+    try:
+        from webrtc_streamer import webrtc_manager
+        return JSONResponse(content=webrtc_manager.get_stats())
+    except Exception as e:
+        return JSONResponse(content={"active_sessions_count": 0, "error": str(e)})
+
+
+@app.delete("/stream/webrtc/{session_id}")
+async def webrtc_close_session_endpoint(session_id: str):
+    """Gracefully closes an active WebRTC streaming session."""
+    try:
+        from webrtc_streamer import webrtc_manager
+        await webrtc_manager.close_session(session_id)
+        return {"success": True, "session_id": session_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/media/{filename}")
