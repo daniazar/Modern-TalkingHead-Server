@@ -182,27 +182,41 @@ def preprocess_avatar_ditto(
 
     # 4. Extract Background Video Frames (frames.pt)
     frames_path = target_dir / "frames.pt"
-    cap = cv2.VideoCapture(video_path)
-    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    is_image = video_path.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+    if is_image:
+        img_bgr = cv2.imread(video_path)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Failed to read input image from {video_path}")
+        H, W = img_bgr.shape[:2]
+        fps = 25.0
+        cap = None
+    else:
+        cap = cv2.VideoCapture(video_path)
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
     if frames_path.exists() and frames_path.stat().st_size > 0:
         logger.info(f"   [4/6] frames.pt already exists, skipping extraction...")
-        cap.release()
+        if cap is not None:
+            cap.release()
     else:
-        logger.info(f"   [4/6] Extracting Background Video Frames (frames.pt)...")
+        logger.info(f"   [4/6] Extracting Background Frames (frames.pt, is_image={is_image})...")
         t0 = time.perf_counter()
-        frames_tensor = torch.empty((N, 3, H, W), dtype=torch.uint8)
-        idx = 0
-        while idx < N:
-            ret, frame_bgr = cap.read()
-            if not ret:
-                break
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            frames_tensor[idx] = torch.from_numpy(frame_rgb).permute(2, 0, 1)
-            idx += 1
-        cap.release()
+        if is_image:
+            frame_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            frames_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1).unsqueeze(0)
+        else:
+            frames_tensor = torch.empty((N, 3, H, W), dtype=torch.uint8)
+            idx = 0
+            while idx < N:
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    break
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                frames_tensor[idx] = torch.from_numpy(frame_rgb).permute(2, 0, 1)
+                idx += 1
+            cap.release()
         torch.save(frames_tensor, str(frames_path), _use_new_zipfile_serialization=True)
         size_frames_mb = frames_path.stat().st_size / (1024 * 1024)
         del frames_tensor
@@ -269,6 +283,7 @@ def preprocess_avatar_ditto(
     manifest = {
         "avatar_id": clean_id,
         "source_video": video_path,
+        "is_image": is_image,
         "total_frames": N,
         "width": W,
         "height": H,

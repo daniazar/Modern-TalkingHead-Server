@@ -1194,6 +1194,11 @@ class DittoEngine:
                     logger.warning(f"[DittoEngine] TRT engine load notice ({trt_err}), falling back to Eager PyTorch.")
 
         self.fused_engine = FusedWarpDecoder(self.warp_net, self.decoder, trt_runner=self.trt_runner)
+        try:
+            from optimizations import SkinDetailerCUDA
+            self.skin_detailer = SkinDetailerCUDA(strength=0.25, threshold=0.008, device=str(self.device))
+        except Exception:
+            self.skin_detailer = None
         logger.info(f"[{time.perf_counter() - t0:.2f}s] Warping & decoder weights loaded (precision={precision})")
 
     def get_compiled_engine(self, batch_size: int = 4):
@@ -1319,6 +1324,11 @@ class DittoEngine:
         silence_thresh = float(opts.get("silence_thresh", 0.008))
         sampling_timesteps = int(opts.get("sampling_timesteps", opts.get("samplingTimesteps", 4)))
         emo = int(opts.get("emo", 4))
+        freeze_head_pose = bool(opts.get("freeze_head_pose", False))
+        head_pose_mode = str(opts.get("head_pose_mode", "freeze" if freeze_head_pose else "natural")).lower()
+        freeze_head = freeze_head_pose or (head_pose_mode == "freeze")
+        mouth_enhancer = bool(opts.get("mouth_enhancer", opts.get("unsharp", False)))
+        texture_injection = float(opts.get("texture_injection", 0.0))
 
         t_global_start = time.perf_counter()
 
@@ -1345,7 +1355,7 @@ class DittoEngine:
         num_template_frames = manifest["total_frames"]
         W, H = manifest["width"], manifest["height"]
         target_fps = float(fps or manifest.get("fps", 25.0))
-        logger.info(f"[{time.perf_counter() - t_pool_0:.2f}s] Acquired loop '{os.path.basename(str(packet_dir))}' from bounded LRU pool")
+        logger.info(f"[{time.perf_counter() - t_pool_0:.2f}s] Acquired loop '{os.path.basename(str(packet_dir))}' from bounded LRU pool (freeze_head={freeze_head}, mode={head_pose_mode})")
 
         # 3. Configure persistent StreamSDK modules
         t_sdk_0 = time.perf_counter()
@@ -1354,15 +1364,16 @@ class DittoEngine:
         from stream_pipeline_offline import _mirror_index
 
         x_s_info_lst = x_s_dict["raw_list"]
+        is_image_flag = bool(manifest.get("is_image", False)) or freeze_head
         source_info = {
             "x_s_info_lst": x_s_info_lst,
             "sc": x_s_dict["sc"],
             "eye_open_lst": x_s_dict["eye_open_lst"],
             "eye_ball_lst": x_s_dict["eye_ball_lst"],
-            "is_image_flag": False,
+            "is_image_flag": is_image_flag,
         }
         x_s_0 = x_s_info_lst[0]
-        self.sdk.condition_handler.setup(source_info, emo=emo, eye_f0_mode=True)
+        self.sdk.condition_handler.setup(source_info, emo=emo, eye_f0_mode=(not freeze_head))
         self.sdk.audio2motion.setup(x_s_0, sampling_timesteps=sampling_timesteps)
 
         # 4. Audio Feature Extraction & SHA-256 AudioMotionCache
@@ -1372,8 +1383,10 @@ class DittoEngine:
         audio, sr = librosa.load(audio_path, sr=16000)
         audio_hash = hashlib.sha256(audio.tobytes()).hexdigest()
         avatar_name = os.path.basename(str(packet_dir))
-        cache_key = (audio_hash, emo, sampling_timesteps, avatar_name)
+        cache_key = (audio_hash, emo, sampling_timesteps, avatar_name, freeze_head)
         cached_entry = self.audio_cache.get(cache_key)
+
+        d_keys = ("exp",) if freeze_head else ("exp", "pitch", "yaw", "roll", "t")
 
         if cached_entry is not None:
             aud_feat = cached_entry["aud_feat"]
@@ -1385,12 +1398,12 @@ class DittoEngine:
             logger.info(f"⚡ [AudioMotionCache] HIT for '{audio_hash[:12]}' ({avatar_name}, emo={emo}): instant audio recall ({num_f} frames)")
             self.sdk.motion_stitch.setup(
                 N_d=num_f,
-                use_d_keys=("exp", "pitch", "yaw", "roll", "t"),
+                use_d_keys=d_keys,
                 relative_d=True,
-                drive_eye=True,
-                delta_eye_open_n=-1,
+                drive_eye=(not freeze_head),
+                delta_eye_open_n=(0 if freeze_head else -1),
                 flag_stitching=True,
-                is_image_flag=False,
+                is_image_flag=is_image_flag,
                 x_s_info=x_s_0,
                 d0=None,
                 overall_ctrl_info={},
@@ -1412,12 +1425,12 @@ class DittoEngine:
             # Motion Stitch & Audio2Motion Diffusion
             self.sdk.motion_stitch.setup(
                 N_d=num_f,
-                use_d_keys=("exp", "pitch", "yaw", "roll", "t"),
+                use_d_keys=d_keys,
                 relative_d=True,
-                drive_eye=True,
-                delta_eye_open_n=-1,
+                drive_eye=(not freeze_head),
+                delta_eye_open_n=(0 if freeze_head else -1),
                 flag_stitching=True,
-                is_image_flag=False,
+                is_image_flag=is_image_flag,
                 x_s_info=x_s_0,
                 d0=None,
                 overall_ctrl_info={},
@@ -1453,28 +1466,38 @@ class DittoEngine:
 
         self.sdk.motion_stitch.setup(
             N_d=num_f,
-            use_d_keys=("exp", "pitch", "yaw", "roll", "t"),
+            use_d_keys=d_keys,
             relative_d=True,
-            drive_eye=True,
-            delta_eye_open_n=-1,
+            drive_eye=(not freeze_head),
+            delta_eye_open_n=(0 if freeze_head else -1),
             flag_stitching=False,  # Single batched StitchNetwork forward pass
-            is_image_flag=False,
+            is_image_flag=is_image_flag,
             x_s_info=x_s_0,
             d0=None,
             overall_ctrl_info={},
         )
 
-        # Pre-compute transformed keypoints for the T unique template frames (eliminates N-T redundant transforms)
-        x_s_kps = [transform_keypoint(x_s_info_lst[t]) for t in range(num_template_frames)]
-        f_s_indices = [_mirror_index(f, num_template_frames) for f in range(num_f)]
-        x_s_raw = np.concatenate([x_s_kps[t] for t in f_s_indices], axis=0)
-
-        xd_raw_list = []
-        for f in range(num_f):
-            t_idx = f_s_indices[f]
-            _, xd = self.sdk.motion_stitch(x_s_info_lst[t_idx], x_d_info_list[f])
-            xd_raw_list.append(xd)
-        xd_raw = np.concatenate(xd_raw_list, axis=0)
+        if freeze_head:
+            # Rigorous stationary anchor: lock template landmarks & indices to frame 0
+            x_s_0_kp = transform_keypoint(x_s_info_lst[0])
+            x_s_raw = np.concatenate([x_s_0_kp for _ in range(num_f)], axis=0)
+            f_s_indices = [0] * num_f
+            xd_raw_list = []
+            for f in range(num_f):
+                _, xd = self.sdk.motion_stitch(x_s_info_lst[0], x_d_info_list[f])
+                xd_raw_list.append(xd)
+            xd_raw = np.concatenate(xd_raw_list, axis=0)
+        else:
+            # Pre-compute transformed keypoints for the T unique template frames (eliminates N-T redundant transforms)
+            x_s_kps = [transform_keypoint(x_s_info_lst[t]) for t in range(num_template_frames)]
+            f_s_indices = [_mirror_index(f, num_template_frames) for f in range(num_f)]
+            x_s_raw = np.concatenate([x_s_kps[t] for t in f_s_indices], axis=0)
+            xd_raw_list = []
+            for f in range(num_f):
+                t_idx = f_s_indices[f]
+                _, xd = self.sdk.motion_stitch(x_s_info_lst[t_idx], x_d_info_list[f])
+                xd_raw_list.append(xd)
+            xd_raw = np.concatenate(xd_raw_list, axis=0)
 
         x_s_gpu_all = torch.from_numpy(x_s_raw).to(self.device, dtype=torch.float32)
         xd_gpu_raw = torch.from_numpy(xd_raw).to(self.device, dtype=torch.float32)
@@ -1631,6 +1654,11 @@ class DittoEngine:
 
                     with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16) if (str(self.device).startswith("cuda") and torch.cuda.is_available()) else nullcontext():
                         pred_b = compiled_fused(arena.f_s, arena.x_s, arena.x_d)[:num_kfs]
+
+                    if mouth_enhancer and getattr(self, "skin_detailer", None) is not None:
+                        pred_b = self.skin_detailer(pred_b)
+                    if texture_injection > 0.0:
+                        pred_b = (pred_b + texture_injection * (pred_b - F.avg_pool2d(pred_b, 3, stride=1, padding=1))).clamp(0.0, 1.0)
 
                     chunk_preds = torch.empty((chunk_len, 3, 512, 512), dtype=calc_dtype, device=self.device)
                     for ki, k_pos in enumerate(range(0, chunk_len, stride)):

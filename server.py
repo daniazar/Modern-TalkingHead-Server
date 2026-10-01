@@ -377,6 +377,7 @@ async def generate_talking_head(request: Request):
     # -----------------------------------------------------------------------
     if "multipart/form-data" in content_type:
         form = await request.form()
+        model_id = str(form.get("model_id", form.get("model", "musetalk"))).lower()
         avatar_id = str(form.get("avatar_id", "ruby"))
         use_cache = str(form.get("use_cache", "true")).lower() in ("true", "1", "yes")
         fps = int(form.get("fps", 30))
@@ -387,14 +388,17 @@ async def generate_talking_head(request: Request):
         texture_injection = float(form.get("texture_injection", 0.0)) if form.get("texture_injection") else 0.0
         start_frame_offset = int(form.get("start_frame_offset", 0)) if form.get("start_frame_offset") else 0
         stride = int(float(form.get("stride", 1))) if form.get("stride") else 1
+        freeze_head_pose = str(form.get("freeze_head_pose", "false")).lower() in ("true", "1", "yes")
+        head_pose_mode = str(form.get("head_pose_mode", "freeze" if freeze_head_pose else "natural")).lower()
 
-        video_file = form.get("video")
+        video_file = form.get("video") or form.get("image")
         audio_file = form.get("audio")
 
         video_path = None
         if video_file and hasattr(video_file, "filename") and video_file.filename:
             v_ext = Path(video_file.filename).suffix or ".mp4"
-            video_path = str(cache_dir / f"input_video_{timestamp}{v_ext}")
+            prefix = "input_image_" if v_ext.lower() in [".png", ".jpg", ".jpeg", ".webp"] else "input_video_"
+            video_path = str(cache_dir / f"{prefix}{timestamp}{v_ext}")
             content = await video_file.read()
             with open(video_path, "wb") as f:
                 f.write(content)
@@ -410,7 +414,7 @@ async def generate_talking_head(request: Request):
         with open(audio_path, "wb") as f:
             f.write(audio_content)
 
-        output_path = str(cache_dir / f"output_musetalk_{timestamp}.mp4")
+        output_path = str(cache_dir / f"output_{model_id}_{timestamp}.mp4")
 
         options = {
             "avatar_id": avatar_id,
@@ -422,11 +426,14 @@ async def generate_talking_head(request: Request):
             "texture_injection": texture_injection,
             "start_frame_offset": start_frame_offset,
             "stride": stride,
+            "cadence_stride": stride,
+            "freeze_head_pose": freeze_head_pose,
+            "head_pose_mode": head_pose_mode,
         }
 
         try:
             metrics = engine_manager.execute_inference(
-                model_id="musetalk",
+                model_id=model_id,
                 video_or_image_path=video_path,
                 audio_path=audio_path,
                 output_path=output_path,
